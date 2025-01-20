@@ -1,0 +1,95 @@
+name: Build Windows ARM Installer (Forked)
+
+on:
+  push:
+    tags:
+      - 'v0.4.1'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code from fork
+      uses: actions/checkout@v3
+      with:
+        repository: jonathanwilner/OmniSSHAgent
+        ref: v0.4.1
+
+    - name: Install CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Install WiX Toolset
+      shell: powershell
+      run: |
+        # Download the WiX Toolset (ARM64 version)
+        Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix.x64.exe" -OutFile "wix.exe"
+        # Install WiX - Use the /passive switch for unattended installation
+        Start-Process -Wait -FilePath "wix.exe" -ArgumentList "/passive"
+
+        # Add WiX binaries to the PATH
+        $env:Path += ";C:\Program Files (x86)\WiX Toolset v3.11\bin"
+        Write-Host "WiX path added: $env:Path"
+
+    - name: Set up MSBuild for ARM64
+      uses: microsoft/setup-msbuild@v1
+      with:
+        vs_version: 17.0
+        architecture: arm64
+
+    - name: Configure CMake
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        cmake -B build -S . -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      shell: bash
+      working-directory: ${{ github.workspace }}/build
+      run: |
+        cmake --build . --config Release
+
+    - name: Find WiX source file (.wxs)
+      id: find_wix
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+
+          function findWixFile(dir) {
+            const files = fs.readdirSync(dir);
+            for (const file of files) {
+              const filePath = path.join(dir, file);
+              if (fs.statSync(filePath).isDirectory()) {
+                const found = findWixFile(filePath);
+                if (found) {
+                  return found;
+                }
+              } else if (file.endsWith('.wxs')) {
+                return filePath;
+              }
+            }
+            return null;
+          }
+
+          const wixFile = findWixFile('.');
+          if (wixFile) {
+            core.setOutput('wix_file', wixFile);
+            console.log(`Found WiX file: ${wixFile}`);
+          } else {
+            core.setFailed('WiX source file (.wxs) not found.');
+          }
+
+    - name: Create Installer
+      shell: bash
+      working-directory: ${{ github.workspace }}/build
+      run: |
+        candle.exe ${{ steps.find_wix.outputs.wix_file }}
+        light.exe -ext WixUIExtension -out OmniSSHAgent_ARM64.msi *.obj
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: OmniSSHAgent_ARM64_Installer
+        path: ${{ github.workspace }}/build/OmniSSHAgent_ARM64.msi
